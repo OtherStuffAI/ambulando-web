@@ -22,7 +22,7 @@ Open `http://localhost:8080/`. `/health` identifies artifact version v7. Missing
 
 ## Review and release
 
-The initial `public/` package is byte-for-byte identical to the approved private artifact:
+The page, styles, scripts and product assets in `public/` are byte-for-byte identical to the approved private artifact. Private review attachment files are excluded:
 https://pale-log-tank.rick.runwingman.com/artifacts/Wingman_Suite/ambulando-marketing/v7/
 
 Preserve that surface for comments and direction. Create new artifact versions for later review rounds, then copy the approved files into `public/` so the website and review version stay aligned. Artifact review controls are added by the Artifact WApp, not shipped with this website.
