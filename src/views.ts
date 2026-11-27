@@ -19,19 +19,22 @@ export function fmtDate(d: string) {
 export function renderPage(title: string, page: string, body: string, ctx: PageCtx) {
   const u = ctx.user;
   const nav = [
-    `<a href="/">Home</a>`,
+    `<a href="/"${page === "home" ? ' aria-current="page"' : ""}>Home</a>`,
     `<a href="/courses"${page === "courses" || page === "course" ? ' aria-current="page"' : ""}>Courses</a>`,
     u ? `<a href="/account"${page === "account" ? ' aria-current="page"' : ""}>Account</a>` : `<a href="/login"${page === "login" ? ' aria-current="page"' : ""}>Sign in</a>`,
+    u ? "" : `<a class="nav-cta" href="/courses">Join a cohort</a>`,
     u?.isAdmin ? `<a href="/admin"${page === "admin" ? ' aria-current="page"' : ""}>Admin</a>` : "",
     u ? `<button class="link-btn" data-logout type="button">Sign out</button>` : "",
   ].join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · Ambulando</title><meta name="description" content="Ambulando training cohorts: put AI agents to work and stay sane.">
+<meta name="theme-color" content="#000000"><meta property="og:title" content="${esc(title)} · Ambulando"><meta property="og:image" content="/assets/brand/passage-social.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/passage-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/passage-16.png"><link rel="apple-touch-icon" sizes="180x180" href="/assets/brand/passage-180.png"><link rel="icon" type="image/png" sizes="192x192" href="/assets/brand/passage-192.png">
 <link rel="stylesheet" href="/_app/app.css"><script type="module" src="/_app/client.js"></script></head>
 <body data-page="${esc(page)}"><a class="skip" href="#main">Skip to content</a>
-<header class="site"><div class="wrap bar"><a class="brand" href="/"><img src="/assets/confluence-symbol-provisional.png" width="36" height="36" alt=""><span>Ambulando</span></a><nav aria-label="Main">${nav}</nav></div></header>
+<header class="site"><div class="wrap bar"><a class="brand" href="/"><img src="/assets/brand/passage-app.png" width="40" height="40" alt=""><span>Ambulando</span></a><nav aria-label="Main">${nav}</nav></div></header>
 <main id="main">${body}</main>
-<footer class="site"><div class="wrap"><span>Ambulando · Work with AI, Stay Sane.</span><span class="muted">Powered by NStack</span></div></footer>
+<footer class="site"><div class="wrap"><span>Ambulando · Work with AI, Stay Sane.</span><span class="foot-links"><a href="/courses">Courses</a><a href="/login">Sign in</a><span>Powered by NStack</span></span></div></footer>
 </body></html>`;
 }
 
@@ -44,6 +47,29 @@ function seatsLabel(c: CohortV) {
   if (c.seatsLeft <= 0) return `<span class="pill pill-out">Cohort full</span>`;
   if (c.seatsLeft <= 5) return `<span class="pill pill-warn">${c.seatsLeft} seat${c.seatsLeft === 1 ? "" : "s"} left</span>`;
   return `<span class="pill">${c.seatsLeft} of ${c.capacity} seats open</span>`;
+}
+
+export function homePage() {
+  const shot = (f: string, t: string, d: string, alt: string, wide = false) => `<figure class="shot${wide ? " wide" : ""}"><img src="/assets/${f}" alt="${esc(alt)}" loading="lazy"><figcaption><b>${esc(t)}</b>${esc(d)}</figcaption></figure>`;
+  return `<section class="home-hero"><div class="wrap"><div class="hero-mark"><img src="/assets/brand/passage-app.png" width="40" height="40" alt=""><span>Solvitur Ambulando</span></div>
+<h1>Work with AI. <em>Stay sane.</em></h1><p class="lead">Think out loud with your agents. Ambulando turns the conversation into tasks, documents and tools in one shared workspace that keeps you grounded as it grows.</p>
+<div class="cta-row"><a class="btn btn-primary btn-lg" href="/courses">Join a cohort <span class="arr" aria-hidden="true">→</span></a><a class="btn btn-outline btn-lg" href="/login">Sign in</a></div></div></section>
+<div class="strip"><div class="wrap"><span>Your direction</span><span>Your agents</span><span>Your data</span><span>Powered by NStack</span></div></div>
+<section class="wrap section" id="product"><div class="sec-head"><p class="eyebrow">A home for the work</p><h2>Mostly, you just talk.</h2><p>Start with a conversation in a channel. Your agent tracks the work through tasks, updates and documents.</p></div>
+<div class="shots">${shot("workspace-thread.png", "Conversation", "Talk the brief through with your agent, share a voice note and agree the next step.", "Ambulando conversation thread with human and agent dialogue", true)}${shot("workspace-tasks.png", "Task board", "See what is moving, what needs review and what comes next.", "Ambulando task board grouped by state")}${shot("workspace-task-detail.png", "Task review", "Inspect progress comments and follow the linked document.", "Ambulando task review with progress comments")}${shot("workspace-document.png", "Documents", "Review imagery, tables and human and agent feedback side by side.", "Ambulando document review", true)}</div>
+<p class="muted small" style="margin-top:16px">Real Ambulando interface with isolated sample workspace data.</p></section>
+<section class="wrap section"><div class="sec-head"><p class="eyebrow">Why Ambulando</p><h2>More capability.<br><em>More breathing room.</em></h2></div>
+<div class="bento"><div class="card span4 tint"><span class="num">01</span><h3>Stay in the loop, keep your head clear</h3><p>One useful agent becomes several. Projects multiply. Ambulando gives that activity a structure you can come back to, rather than another stream to remember.</p></div>
+<div class="card"><span class="num">02</span><h3>Multiplayer</h3><p>Many people, many agents, your rules. Access matches each role.</p></div>
+<div class="card"><span class="num">03</span><h3>Shared context</h3><p>Organise around the work, with the brief and files next to the thread.</p></div>
+<div class="card"><span class="num">04</span><h3>Clear responsibility</h3><p>Designer, research agent, coding agent. The owner is always visible.</p></div>
+<div class="card"><span class="num">05</span><h3>Keep options open</h3><p>Workflows and knowledge live outside any one agent session.</p></div>
+<div class="card span3"><span class="num">06</span><h3>NStack: unruggable infrastructure</h3><p>Nostr Stack connects people, agents, apps and data. Let your agents build and keep the foundation yours.</p></div>
+<div class="card span3"><span class="num">07</span><h3>Wingman runs your agents</h3><p>Run your own Wingman or use a hosted option, connected to the workspace and infrastructure you choose.</p></div></div></section>
+<section class="wrap section"><div class="sec-head"><p class="eyebrow">Before you step in</p><h2>A few useful answers.</h2></div>
+<details><summary>How do Ambulando, NStack and Wingman fit together?</summary><p>Ambulando is the human workspace. NStack is the shared infrastructure for data, files, knowledge and access. Wingman runs agents and workflows that connect to both.</p></details>
+<details><summary>How do I learn to work this way?</summary><p>Join a live cohort. Small groups, hands-on, and you leave with your own Chief of Staff agent.</p></details></section>
+<section class="wrap section"><div class="final"><p class="eyebrow">Solvitur Ambulando</p><h2>Find the next step.<br><em>Take it together.</em></h2><p>Start with a conversation. Build a way of working that stays yours.</p><div class="cta-row"><a class="btn btn-primary btn-lg" href="/courses">See courses <span class="arr" aria-hidden="true">→</span></a><a class="btn btn-outline btn-lg" href="/login">Sign in</a></div></div></section>`;
 }
 
 export function catalogPage(courses: CohortV[]) {
@@ -91,7 +117,7 @@ export function completePage(c: CohortV, sessionId: string | null) {
 }
 
 export function loginPage() {
-  return `<section class="wrap section narrow"><div class="card form"><p class="eyebrow">Welcome back</p><h1>Sign in</h1>
+  return `<section class="wrap section narrow"><div class="card form"><img class="signin-mark" src="/assets/brand/passage-app.png" width="64" height="64" alt=""><p class="eyebrow">Welcome back</p><h1>Sign in</h1>
 <form id="login-form" class="form-inner"><label>Username or email<input name="identifier" required autocomplete="username"></label><label>Password<input name="password" type="password" required autocomplete="current-password"></label><div class="form-error" role="alert" hidden></div><button class="btn btn-primary btn-block" type="submit">Sign in</button></form>
 <div class="divider"><span>or</span></div><button class="btn btn-outline btn-block" type="button" data-nostr-login>Sign in with Nostr extension</button><div class="form-error" id="nostr-error" role="alert" hidden></div>
 <p class="muted small">New here? <a href="/courses">Browse courses</a> and enrol to create your account.</p></div></section>`;

@@ -561,8 +561,9 @@ export async function createApp(opts: AppOptions = {}) {
     const ctx = { user: s ? userView(s.user, s.isAdmin) : null, adminNpubs: config.adminNpubs };
     const html = (status: number, title: string, page: string, bodyHtml: string) =>
       new Response(renderPage(title, page, bodyHtml, ctx), { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
-    const { catalogPage, coursePage, enrolPage, completePage, loginPage, accountPage, adminPage, notFoundPage } = await import("./views.ts");
+    const { homePage, catalogPage, coursePage, enrolPage, completePage, loginPage, accountPage, adminPage, notFoundPage } = await import("./views.ts");
 
+    if (path === "/") return html(200, "Work with AI, Stay Sane", "home", homePage());
     if (path === "/courses") {
       const rows = db.query("SELECT * FROM cohorts WHERE status='published' ORDER BY start_date, id").all() as Cohort[];
       return html(200, "Courses", "courses", catalogPage(rows.map(cohortView)));

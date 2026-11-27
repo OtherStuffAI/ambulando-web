@@ -25,13 +25,16 @@ describe("health, static and pages", () => {
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ status: "ok", app: "ambulando-web", artifactVersion: "v7" });
   });
-  test("preserved marketing page, assets and nav links", async () => {
+  test("landing page, brand assets and nav links", async () => {
     const { anon } = await setup();
     const r = await anon().get("/");
     const html = await r.text();
     expect(r.status).toBe(200);
     expect(html).toContain("Solvitur Ambulando");
     expect(html).toContain('href="/courses"');
+    expect(html).toContain("/assets/brand/passage-app.png");
+    expect(html).not.toContain("confluence");
+    expect((await anon().get("/assets/brand/passage-32.png")).headers.get("content-type")).toBe("image/png");
     expect((await anon().get("/tokens.css")).status).toBe(200);
     expect((await anon().get("/assets/workspace-document.png")).headers.get("content-type")).toBe("image/png");
     expect((await anon().get("/../package.json")).status).toBe(404);
