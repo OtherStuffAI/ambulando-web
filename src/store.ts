@@ -214,8 +214,9 @@ export class Store {
       const mine = rows.find((r) => r.holder === holder);
       if (mine) {
         if (mine.state === "paid") return true;
-        if (await this.db.update("seats", mine.id, { reserved_until: reservedUntil, state }, { holder: { eq: holder } })) return true;
-        continue; // taken over meanwhile: look again
+        // Compare-and-set on everything we read: a concurrent confirmSeat (-> paid) or takeover must never be undone.
+        if (await this.db.update("seats", mine.id, { reserved_until: reservedUntil, state }, { holder: { eq: holder }, state: { eq: mine.state }, reserved_until: { eq: num(mine.reserved_until) } })) return true;
+        continue; // changed meanwhile: look again (a paid seat then returns true above)
       }
       const byNo = new Map(rows.map((r) => [num(r.seat_no), r]));
       const limit = opts.force ? Math.max(cohort.capacity, ...rows.map((r) => num(r.seat_no))) + 1 : cohort.capacity;
@@ -247,7 +248,8 @@ export class Store {
     const s = await this.seatOf(enrolmentId);
     if (s && await this.db.update("seats", s.id, { state: "paid", reserved_until: 0 }, { holder: { eq: String(enrolmentId) } })) return;
     // Reservation lapsed and was reused: the payment is real, so take a seat even past capacity.
-    await this.claimSeat(cohort, enrolmentId, 0, { state: "paid", force: true });
+    // Failing here is deliberate: the caller leaves the enrolment pending and Stripe's retry (or the buyer's return) repeats this.
+    if (!(await this.claimSeat(cohort, enrolmentId, 0, { state: "paid", force: true }))) throw new Error(`Could not record a seat for paid enrolment ${enrolmentId}`);
   }
 
   /**

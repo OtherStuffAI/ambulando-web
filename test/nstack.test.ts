@@ -197,3 +197,34 @@ describe("persistence", () => {
     expect(NstackError).toBeDefined();
   });
 });
+
+describe("seat state machine races (review findings)", () => {
+  test("a refresh of a held seat never demotes a seat that a concurrent payment just made paid", async () => {
+    const { s, cohort } = await ready(2);
+    const a = await signup(s, cohort.slug, "demote@example.com");
+    expect(a.res.status).toBe(200);
+    const enr = s.fake.rows("enrolments")[0];
+    const user = await s.app.store.userById(Number(enr.user_id));
+    const c = (await s.app.store.cohortById(Number(cohort.id)))!;
+    let fired = 0;
+    s.fake.beforeMutation = (what) => {
+      if (what === "update:seats" && fired++ === 0) { s.fake.rows("seats")[0].state = "paid"; s.fake.rows("seats")[0].reserved_until = 0; } // concurrent confirmSeat wins first
+    };
+    const r = await s.app.store.reserve(user!, c, Date.now() + 99_000);
+    s.fake.beforeMutation = undefined;
+    expect("error" in r ? r.error : "ok").toBe("ok");
+    expect(s.fake.rows("seats").map((x) => x.state)).toEqual(["paid"]);
+  });
+
+  test("a paid enrolment whose seat cannot be recorded stays pending instead of silently losing the seat", async () => {
+    const { s, cohort } = await ready(1);
+    const a = await signup(s, cohort.slug, "nopaidseat@example.com");
+    const sid = a.body.checkoutUrl.split("/").pop() as string;
+    s.fake.rows("seats")[0].holder = "9999"; // seat taken over by someone else
+    s.app.store.claimSeat = async () => false;
+    s.stripe.pay(sid);
+    const r = await a.c.get(`/api/enrolments/confirm?session_id=${sid}`);
+    expect(r.status).toBe(500);
+    expect(s.fake.rows("enrolments")[0].status).toBe("pending");
+  });
+});
