@@ -30,3 +30,11 @@ Preserve that surface for comments and direction. Create new artifact versions f
 Develop on `main`, validate and push it, then fast-forward `deployed` from `main` and push `deployed`. Return to `main`. Avoid merge commits, resets, rebases and force pushes in the deployment path.
 
 The hero retains a labelled product-video placeholder until a video URL is supplied. Product screenshots use isolated sample data; the business/time example is illustrative. See `public/source-notes.md` for provenance and claim boundaries.
+
+## Training signup app (Bun + SQLite + Applesauce)
+
+- Run: `bun install && bun src/server.ts` (PORT, default 3000). Tests: `bun test`.
+- Env: `ADMIN_NPUBS` (comma-separated, defaults to Pete's npub), `DATABASE_PATH` (default `./data/ambulando.sqlite`), `APP_SECRET_KEY` (optional passphrase for encrypting Stripe keys at rest; otherwise a `secret.key` file is created next to the DB), `BASE_URL` (public origin for Stripe return URLs), `PORT`.
+- Admin: sign in at `/admin` with a NIP-07 extension using an npub in `ADMIN_NPUBS`; set Stripe keys, create cohorts, view signups.
+- Stripe webhook (optional, recommended): `POST /api/stripe/webhook` with `checkout.session.completed`. Payments are also confirmed when the buyer returns from Stripe Checkout.
+- Persist the DB directory (`/data` in the Docker image) so users, backups and the encryption key survive deploys.

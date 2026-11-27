@@ -7,3 +7,5 @@ const views = {
 function showView(key){const view=views[key];if(!view)return;const path='assets/'+view.file;document.querySelector('#render-image').src=path;document.querySelector('#render-image').alt=view.alt;document.querySelector('#render-caption').textContent=view.caption;for(const id of ['render-link','render-full'])document.getElementById(id).href=path;document.querySelectorAll('[data-view]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.view===key)));}
 document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>showView(button.dataset.view)));
 document.querySelectorAll('[data-show]').forEach(link=>link.addEventListener('click',()=>showView(link.dataset.show)));
+
+fetch('/api/me',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(d=>{const u=d&&d.user;const a=document.getElementById('nav-account');if(a&&!u){a.textContent='Sign in';a.href='/login'}const m=document.getElementById('nav-admin');if(m&&u&&u.isAdmin)m.hidden=false}).catch(()=>{});

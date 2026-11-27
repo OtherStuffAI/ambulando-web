@@ -1,4 +1,7 @@
 .git
 tmp
+data
+node_modules
+test
 .DS_Store
 README.md
