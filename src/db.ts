@@ -68,6 +68,13 @@ const MIGRATIONS: string[] = [
     id TEXT PRIMARY KEY,
     received_at INTEGER NOT NULL
   );`,
+  // Nostr profile cache + Chief of Staff agent identity. encrypted_agent_nsec is NIP-44 self-encrypted client side; the server cannot read it.
+  `ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT '';
+  ALTER TABLE users ADD COLUMN agent_npub TEXT NOT NULL DEFAULT '';
+  ALTER TABLE users ADD COLUMN agent_avatar TEXT NOT NULL DEFAULT '';
+  ALTER TABLE users ADD COLUMN agent_role TEXT NOT NULL DEFAULT '';
+  ALTER TABLE users ADD COLUMN encrypted_agent_nsec TEXT NOT NULL DEFAULT '';
+  ALTER TABLE users ADD COLUMN agent_encryption_scheme TEXT NOT NULL DEFAULT '';`,
 ];
 
 export function openDb(path: string): Database {

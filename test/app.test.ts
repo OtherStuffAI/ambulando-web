@@ -382,3 +382,183 @@ describe("chief of staff agent + account + admin signups", () => {
     expect(mine[0]).toMatchObject({ slug: c.slug, status: "paid" });
   });
 });
+
+// ---------- Nostr profile sync & Chief of Staff wizard ----------
+import { generateSecretKey as genSk, getPublicKey as pubOf } from "nostr-tools/pure";
+import { finalizeEvent, verifyEvent as verifyNostrEvent, type Event } from "nostr-tools/pure";
+import { decode as nip19Decode, npubEncode as npubOf } from "nostr-tools/nip19";
+import * as nip44 from "nostr-tools/nip44";
+import {
+  decryptAgentNsec, encryptAgentNsec, fetchProfile, generateAgentIdentity, localSigner, mergeProfile, parseRelays,
+  profileDisplayName, profilePicture, publishAgentProfile, publishProfileUpdate, DEFAULT_RELAYS, type RelayIO,
+} from "../src/shared/nostr-profile.ts";
+
+class MockRelays implements RelayIO {
+  events: Event[] = [];
+  published: Event[] = [];
+  async query(_r: string[], f: { kinds: number[]; authors: string[] }) {
+    return this.events.filter((e) => f.kinds.includes(e.kind) && f.authors.includes(e.pubkey));
+  }
+  async publish(_r: string[], e: Event) { this.published.push(e); this.events.push(e); return 2; }
+}
+const kind0 = (sk: Uint8Array, meta: object, created_at: number) => finalizeEvent({ kind: 0, created_at, tags: [], content: JSON.stringify(meta) }, sk);
+
+describe("nostr profile helpers (mocked relays)", () => {
+  test("fetchProfile picks the newest kind 0 from the author and ignores junk", async () => {
+    const sk = genSk(), other = genSk(), io = new MockRelays();
+    io.events = [kind0(sk, { name: "old" }, 100), kind0(sk, { display_name: "New Name", picture: "https://x.test/a.png" }, 200), kind0(other, { name: "imposter" }, 300),
+      finalizeEvent({ kind: 0, created_at: 400, tags: [], content: "not json" }, sk)];
+    const p = await fetchProfile(io, pubOf(sk));
+    expect(p.event!.created_at).toBe(400); // newest event wins, but unparsable content yields empty meta
+    expect(p.meta).toEqual({});
+    io.events.pop();
+    const q = await fetchProfile(io, pubOf(sk));
+    expect(profileDisplayName(q.meta)).toBe("New Name");
+    expect(profilePicture(q.meta)).toBe("https://x.test/a.png");
+    expect((await fetchProfile({ query: async () => { throw new Error("offline"); }, publish: async () => 0 }, pubOf(sk))).event).toBeNull();
+  });
+  test("mergeProfile preserves unmanaged fields", () => {
+    const merged = mergeProfile({ name: "sam", about: "bio", nip05: "sam@x.test", lud16: "sam@ln.test", banner: "https://b" }, { displayName: "Sam W", picture: "https://p" });
+    expect(merged).toEqual({ name: "sam", about: "bio", nip05: "sam@x.test", lud16: "sam@ln.test", banner: "https://b", display_name: "Sam W", picture: "https://p" });
+  });
+  test("publishProfileUpdate merges with the existing profile and signs a valid kind 0", async () => {
+    const sk = genSk(), io = new MockRelays();
+    io.events = [kind0(sk, { name: "sam", about: "keep me", nip05: "sam@x.test" }, 100)];
+    const r = await publishProfileUpdate(io, localSigner(sk), { displayName: "Sam W", picture: "https://p/a.png" }, DEFAULT_RELAYS, () => 500);
+    expect(r.accepted).toBe(2);
+    expect(verifyNostrEvent(r.event)).toBe(true);
+    expect(r.event.kind).toBe(0);
+    expect(r.event.pubkey).toBe(pubOf(sk));
+    expect(JSON.parse(r.event.content)).toEqual({ name: "sam", about: "keep me", nip05: "sam@x.test", display_name: "Sam W", picture: "https://p/a.png" });
+  });
+  test("parseRelays falls back to defaults and drops bad entries", () => {
+    expect(parseRelays(undefined)).toEqual(DEFAULT_RELAYS);
+    expect(parseRelays("wss://a.test, junk ,ws://b.test")).toEqual(["wss://a.test", "ws://b.test"]);
+    expect(loadConfig({}).nostrRelays.length).toBeGreaterThan(0);
+  });
+  test("agent identity: NIP-44 self-encryption round-trips with the user's key only", async () => {
+    const userSk = genSk(), user = localSigner(userSk);
+    const agent = generateAgentIdentity();
+    expect(agent.npub).toBe(npubOf(agent.pubkey));
+    expect(agent.pubkey).not.toBe(pubOf(userSk));
+    const enc = await encryptAgentNsec(user, agent.nsec);
+    expect(enc.agent_encryption_scheme).toBe("nip44_self");
+    expect(enc.encrypted_agent_nsec).not.toContain(agent.nsec);
+    expect(await decryptAgentNsec(user, enc.encrypted_agent_nsec)).toBe(agent.nsec);
+    // Raw nostr-tools agrees (interoperable payload), and a different key cannot decrypt.
+    const ck = nip44.v2.utils.getConversationKey(userSk, pubOf(userSk));
+    expect(nip44.v2.decrypt(enc.encrypted_agent_nsec, ck)).toBe(agent.nsec);
+    await expect(decryptAgentNsec(localSigner(genSk()), enc.encrypted_agent_nsec)).rejects.toThrow();
+  });
+  test("publishAgentProfile signs with the agent key", async () => {
+    const io = new MockRelays(), agent = generateAgentIdentity();
+    const r = await publishAgentProfile(io, agent, { name: "Atlas", picture: "https://p/atlas.png", about: "Chief of Staff" });
+    expect(verifyNostrEvent(r.event)).toBe(true);
+    expect(r.event.pubkey).toBe(agent.pubkey);
+    expect(JSON.parse(r.event.content)).toEqual({ name: "Atlas", display_name: "Atlas", picture: "https://p/atlas.png", about: "Chief of Staff" });
+  });
+});
+
+describe("profile and Chief of Staff API", () => {
+  async function member() {
+    const s = await setup();
+    const sk = genSk(), c = s.anon();
+    expect((await c.nostrLogin(sk)).res.status).toBe(200);
+    return { ...s, c, sk, user: localSigner(sk), npub: npubOf(pubOf(sk)) };
+  }
+
+  test("PATCH /api/me stores display name and avatar, rejects unsafe avatar URLs", async () => {
+    const { c } = await member();
+    const r = await c.patch("/api/me", { displayName: "Sam W", avatarUrl: "https://img.test/sam.png" });
+    expect(r.status).toBe(200);
+    const u = ((await r.json()) as any).user;
+    expect(u.displayName).toBe("Sam W");
+    expect(u.avatarUrl).toBe("https://img.test/sam.png");
+    expect(((await (await c.get("/api/me")).json()) as any).user.avatarUrl).toBe("https://img.test/sam.png");
+    expect((await c.patch("/api/me", { avatarUrl: "javascript:alert(1)" })).status).toBe(400);
+    expect((await c.patch("/api/me", { avatarUrl: "data:text/html;base64,AAAA" })).status).toBe(400);
+    expect((await c.patch("/api/me", { avatarUrl: "data:image/png;base64,iVBORw0KGgo=" })).status).toBe(200);
+    expect((await c.patch("/api/me", { avatarUrl: "" })).status).toBe(200);
+  });
+
+  test("header shows avatar and name; account page renders the wizard", async () => {
+    const { c } = await member();
+    await c.patch("/api/me", { displayName: "Sam W", avatarUrl: "https://img.test/sam.png" });
+    const html = await (await c.get("/account")).text();
+    expect(html).toContain('class="nav-avatar"');
+    expect(html).toContain("https://img.test/sam.png");
+    expect(html).toContain("Setup your AI Chief of Staff");
+    expect(html).toContain('id="cos-wizard"');
+  });
+
+  test("saves Chief of Staff with a NIP-44 self-encrypted agent key; server never holds plaintext", async () => {
+    const { c, user, sk, npub, app } = await member();
+    const agent = generateAgentIdentity();
+    const enc = await encryptAgentNsec(user, agent.nsec);
+    const r = await c.post("/api/account/chief-of-staff", {
+      agent_name: "Atlas", agent_role: "Keeps my week in order", agent_avatar: "https://img.test/atlas.png",
+      agent_npub: agent.npub, ...enc,
+    });
+    expect(r.status).toBe(200);
+    const out = (await r.json()) as any;
+    expect(out.chiefOfStaff).toMatchObject({ agent_name: "Atlas", agent_role: "Keeps my week in order", agent_avatar: "https://img.test/atlas.png", agent_npub: agent.npub, agent_encryption_scheme: "nip44_self" });
+    expect(out.user).toMatchObject({ agentName: "Atlas", agentNpub: agent.npub, hasAgentKey: true });
+    expect(JSON.stringify(out.user)).not.toContain(enc.encrypted_agent_nsec); // ciphertext only via the dedicated endpoint
+
+    // Round trip: fetch ciphertext back and decrypt with the user's own key.
+    const got = ((await (await c.get("/api/account/chief-of-staff")).json()) as any).chiefOfStaff;
+    expect(got.encrypted_agent_nsec).toBe(enc.encrypted_agent_nsec);
+    expect(await decryptAgentNsec(localSigner(sk), got.encrypted_agent_nsec)).toBe(agent.nsec);
+
+    // Nothing in SQLite contains the plaintext nsec or its raw secret bytes.
+    const dump = JSON.stringify(app.db.query("SELECT * FROM users").all());
+    expect(dump).not.toContain(agent.nsec);
+    expect(dump).not.toContain(Buffer.from(agent.sk).toString("hex"));
+    expect(dump).toContain(enc.encrypted_agent_nsec);
+    expect((nip19Decode(npub) as any).data).toBe(pubOf(sk));
+  });
+
+  test("rejects plaintext or malformed agent keys and bad schemes", async () => {
+    const { c, user, npub, anon } = await member();
+    const agent = generateAgentIdentity();
+    const good = await encryptAgentNsec(user, agent.nsec);
+    const base = { agent_name: "Atlas", agent_npub: agent.npub, ...good };
+    for (const bad of [
+      { encrypted_agent_nsec: agent.nsec },
+      { encrypted_agent_nsec: Buffer.from(agent.nsec).toString("base64").padEnd(140, "A") },
+      { encrypted_agent_nsec: "" },
+      { agent_encryption_scheme: "plaintext" },
+      { agent_npub: "npub1notvalid" },
+      { agent_npub: npub },
+      { agent_name: "" },
+    ]) {
+      expect((await c.post("/api/account/chief-of-staff", { ...base, ...bad })).status).toBe(400);
+    }
+    expect(((await (await c.get("/api/account/chief-of-staff")).json()) as any).chiefOfStaff.agent_npub).toBe("");
+    expect((await anon().post("/api/account/chief-of-staff", base)).status).toBe(401);
+  });
+
+  test("editing name/avatar without a key keeps the existing encrypted key; admin sees agent npub", async () => {
+    const { c, user } = await member();
+    const agent = generateAgentIdentity();
+    const enc = await encryptAgentNsec(user, agent.nsec);
+    await c.post("/api/account/chief-of-staff", { agent_name: "Atlas", agent_npub: agent.npub, ...enc });
+    const r = await c.post("/api/account/chief-of-staff", { agent_name: "Rick", agent_avatar: "https://img.test/rick.png" });
+    expect(r.status).toBe(200);
+    const got = ((await r.json()) as any).chiefOfStaff;
+    expect(got).toMatchObject({ agent_name: "Rick", agent_npub: agent.npub, encrypted_agent_nsec: enc.encrypted_agent_nsec });
+    // admin signup list exposes the agent npub (never the ciphertext)
+  });
+
+  test("admin signups include the agent npub but never the ciphertext", async () => {
+    const s = await member();
+    const cohort = await withCohort(s, { priceCents: 0, capacity: 5 });
+    const agent = generateAgentIdentity();
+    const enc = await encryptAgentNsec(s.user, agent.nsec);
+    expect((await s.c.post(`/api/courses/${cohort.slug}/enrol`, { agentName: "Atlas" })).status).toBe(200);
+    await s.c.post("/api/account/chief-of-staff", { agent_name: "Atlas", agent_npub: agent.npub, ...enc });
+    const raw = await (await s.admin.get(`/api/admin/cohorts/${cohort.id}/signups`)).text();
+    expect(JSON.parse(raw).signups[0]).toMatchObject({ agentName: "Atlas", agentNpub: agent.npub });
+    expect(raw).not.toContain(enc.encrypted_agent_nsec);
+  });
+});

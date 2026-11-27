@@ -1,4 +1,5 @@
 import { decodePointer } from "applesauce-core/helpers";
+import { parseRelays } from "./shared/nostr-profile.ts";
 
 export const PETE_NPUB = "npub1jss47s4fvv6usl7tn6yp5zamv2u60923ncgfea0e6thkza5p7c3q0afmzy";
 
@@ -11,6 +12,8 @@ export interface Config {
   /** Optional passphrase for encrypting secrets at rest; otherwise a key file next to the DB is used. */
   secretKey?: string;
   baseUrl?: string;
+  /** Relays the browser uses to read/publish Nostr kind 0 profiles. */
+  nostrRelays: string[];
 }
 
 export function npubToHex(npub: string): string | null {
@@ -33,5 +36,6 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     publicDir: overrides.publicDir ?? new URL("../public", import.meta.url).pathname,
     secretKey: overrides.secretKey ?? process.env.APP_SECRET_KEY,
     baseUrl: overrides.baseUrl ?? process.env.BASE_URL,
+    nostrRelays: overrides.nostrRelays ?? parseRelays(process.env.NOSTR_RELAYS),
   };
 }

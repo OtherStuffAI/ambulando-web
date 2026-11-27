@@ -1,7 +1,12 @@
 import { generateSecretKey, getPublicKey } from "applesauce-core/helpers/keys";
 import { npubEncode, nsecEncode } from "applesauce-core/helpers/pointers";
 import { ExtensionSigner } from "applesauce-signers";
+import { decode } from "nostr-tools/nip19";
 import { decryptNsec, encryptNsec } from "../shared/backup.ts";
+import {
+  DEFAULT_RELAYS, SELF_SCHEME, encryptAgentNsec, decryptAgentNsec, extensionSigner, fetchProfile, generateAgentIdentity, localSigner, parseRelays,
+  poolRelayIO, profileDisplayName, profilePicture, publishAgentProfile, publishProfileUpdate, type UserSigner,
+} from "../shared/nostr-profile.ts";
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector<T>(sel);
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
@@ -33,6 +38,24 @@ async function withBusy(btn: HTMLButtonElement | null, fn: () => Promise<void>) 
   try { await fn(); } finally { if (btn) btn.disabled = false; }
 }
 
+// ---------- Nostr profile sync ----------
+const relayList = () => { const r = document.body.dataset.relays; return r ? parseRelays(r) : DEFAULT_RELAYS; };
+const hexOf = (npub: string) => (decode(npub) as { data: string }).data;
+
+/** Pull kind 0 from relays and cache display name / avatar in the DB. Returns the updated user view or null. */
+async function syncProfileFromRelays(user: { displayName?: string; avatarUrl?: string }, pubkey: string) {
+  try {
+    const { meta } = await fetchProfile(await poolRelayIO(), pubkey, relayList());
+    const displayName = profileDisplayName(meta).slice(0, 80);
+    const picture = profilePicture(meta);
+    const body: Record<string, string> = {};
+    if (displayName && displayName !== user.displayName) body.displayName = displayName;
+    if (/^https?:\/\//.test(picture) && picture.length <= 500 && picture !== user.avatarUrl) body.avatarUrl = picture;
+    if (!Object.keys(body).length) return null;
+    return (await api("/api/me", { method: "PATCH", body })).user;
+  } catch { return null; }
+}
+
 // ---------- Nostr login (NIP-07 via Applesauce ExtensionSigner) ----------
 async function nostrLogin(errorEl: HTMLElement | null) {
   const fail = (m: string) => { if (errorEl) { errorEl.textContent = m; errorEl.hidden = false; } };
@@ -41,7 +64,9 @@ async function nostrLogin(errorEl: HTMLElement | null) {
     const { challenge, kind } = await api("/api/auth/challenge");
     const signer = new ExtensionSigner();
     const event = await signer.signEvent({ kind, created_at: Math.floor(Date.now() / 1000), tags: [["challenge", challenge]], content: "Sign in to Ambulando" });
-    await api("/api/auth/nostr", { method: "POST", body: { event } });
+    const r = await api("/api/auth/nostr", { method: "POST", body: { event } });
+    // Best effort: pull display name and avatar from the user's Nostr profile before landing (never blocks sign-in).
+    await Promise.race([syncProfileFromRelays(r.user, event.pubkey), new Promise((res) => setTimeout(res, 5000))]).catch(() => {});
     location.href = document.body.dataset.page === "admin" ? "/admin" : "/account";
   } catch (e: any) { fail(e.message || "Nostr sign-in failed"); }
 }
@@ -126,16 +151,71 @@ if (complete) {
 }
 
 // ---------- Account ----------
+const accountRoot = $("#account-root");
+let unlockedSk: Uint8Array | null = null;
+let backupBundle: any = null;
+
+/** Extension signer when it controls the account key; else the unlocked local key (optionally unlocking with the password). */
+async function getSigner(npub: string, password?: string): Promise<UserSigner> {
+  const pubkey = hexOf(npub);
+  const nostr = (window as any).nostr;
+  if (nostr) {
+    try { if ((await nostr.getPublicKey()) === pubkey) return extensionSigner(nostr); } catch { /* fall through to local key */ }
+  }
+  if (!unlockedSk && backupBundle && password) {
+    const d = decode(await decryptNsec(backupBundle, password));
+    if (d.type !== "nsec") throw new Error("Backup does not contain a valid key");
+    unlockedSk = d.data as Uint8Array;
+  }
+  if (!unlockedSk) throw new Error(backupBundle ? "Enter your password to unlock your key." : "No Nostr extension or unlocked key is available to sign with.");
+  return localSigner(unlockedSk);
+}
+
+const setAvatar = (url: string) => {
+  const el = $("#profile-avatar");
+  if (!el || !url) return;
+  if (el instanceof HTMLImageElement) el.src = url;
+  else { const img = document.createElement("img"); img.id = "profile-avatar"; img.className = "profile-avatar"; img.width = img.height = 64; img.src = url; img.alt = ""; el.replaceWith(img); }
+};
+
 const profile = $<HTMLFormElement>("#profile-form");
-if (profile) {
+if (profile && accountRoot) {
+  const npub = accountRoot.dataset.npub!;
+  const needsPassword = () => !(window as any).nostr;
   profile.addEventListener("submit", async (e) => {
     e.preventDefault();
     showError(profile, null); showError(profile, null, ".form-ok");
     await withBusy($("button[type=submit]", profile), async () => {
-      try { await api("/api/me", { method: "PATCH", body: formData(profile) }); showError(profile, "Saved", ".form-ok"); }
-      catch (err: any) { showError(profile, err.message); }
+      try {
+        const d = formData(profile);
+        const avatarUrl = d.avatarUrl.trim();
+        await api("/api/me", { method: "PATCH", body: { displayName: d.displayName, ...(avatarUrl ? { avatarUrl } : {}) } });
+        if (avatarUrl) setAvatar(avatarUrl);
+        let msg = "Saved";
+        if (profile.querySelector<HTMLInputElement>("[name=publish]")!.checked) {
+          try {
+            const signer = await getSigner(npub, d.password);
+            const r = await publishProfileUpdate(await poolRelayIO(), signer, { displayName: d.displayName, picture: avatarUrl || undefined }, relayList());
+            msg = r.accepted ? `Saved and published to ${r.accepted} relay${r.accepted === 1 ? "" : "s"}` : "Saved, but no relay accepted the Nostr update";
+          } catch (err: any) { msg = `Saved here. Not published to Nostr: ${err.message}`; $("#profile-unlock")!.hidden = !needsPassword(); }
+        }
+        showError(profile, msg, ".form-ok");
+      } catch (err: any) { showError(profile, err.message); }
     });
   });
+  if (needsPassword()) $("#profile-unlock")!.hidden = false;
+
+  (async () => {
+    // Sign-in sync: relay profile fills the cached display name/avatar.
+    const me = (await api("/api/me")).user;
+    const updated = await syncProfileFromRelays(me, hexOf(npub));
+    if (updated) {
+      (profile.elements.namedItem("displayName") as HTMLInputElement).value = updated.displayName;
+      if (updated.avatarUrl) { (profile.elements.namedItem("avatarUrl") as HTMLInputElement).value = updated.avatarUrl; setAvatar(updated.avatarUrl); }
+      const sync = $("#profile-sync"); if (sync) sync.textContent = "Synced from your Nostr profile.";
+    }
+  })().catch(() => {});
+
   (async () => {
     const box = $("#my-courses")!;
     const { enrolments } = await api("/api/me/enrolments");
@@ -145,6 +225,7 @@ if (profile) {
       : `You haven't enrolled yet. <a href="/courses">Browse courses</a>.`;
     const { backup } = await api("/api/me/backup");
     if (backup) {
+      backupBundle = backup;
       $("#backup-box")!.hidden = false;
       const unlock = $<HTMLFormElement>("#unlock-form")!;
       unlock.addEventListener("submit", async (e) => {
@@ -152,6 +233,8 @@ if (profile) {
         showError(unlock, null);
         try {
           const nsec = await decryptNsec(backup, formData(unlock).password);
+          const d = decode(nsec);
+          if (d.type === "nsec") unlockedSk = d.data as Uint8Array;
           $("#nsec")!.textContent = nsec;
           $("#nsec-out")!.hidden = false;
           $("#copy-nsec")!.onclick = () => navigator.clipboard?.writeText(nsec);
@@ -159,6 +242,115 @@ if (profile) {
       });
     }
   })();
+  initChiefOfStaff(accountRoot, npub, needsPassword);
+}
+
+// ---------- Chief of Staff wizard ----------
+function initChiefOfStaff(root: HTMLElement, npub: string, needsPassword: () => boolean) {
+  const wizard = $("#cos-wizard", root)!;
+  const errEl = $("#cos-error", root)!;
+  const next = $<HTMLButtonElement>("#cos-next", root)!;
+  const back = $<HTMLButtonElement>("#cos-back", root)!;
+  const val = (id: string) => ($<HTMLInputElement>(id, root)!).value.trim();
+  const fail = (m: string | null) => { errEl.textContent = m ?? ""; errEl.hidden = !m; };
+  let step = 1;
+  let avatar = ($<HTMLImageElement>("#cos-preview", root)!).getAttribute("src") ?? "";
+
+  const show = (n: number) => {
+    step = n; fail(null);
+    wizard.querySelectorAll<HTMLElement>("[data-pane]").forEach((p) => (p.hidden = Number(p.dataset.pane) !== n));
+    wizard.querySelectorAll<HTMLElement>(".steps li").forEach((li) => { const k = Number(li.dataset.step); li.classList.toggle("on", k === n); li.classList.toggle("done", k < n); });
+    back.hidden = n === 1 || n === 4;
+    next.hidden = n === 4;
+    next.textContent = n === 3 ? (($<HTMLInputElement>("#cos-regen", root) && !$<HTMLInputElement>("#cos-regen", root)!.checked) ? "Save Chief of Staff" : "Generate, encrypt & save") : "Continue";
+    if (n === 3) ($("#cos-password-row", root)!).hidden = !needsPassword() || !!unlockedSk;
+  };
+  $("#cos-start", root)!.addEventListener("click", () => { wizard.hidden = false; show(1); wizard.scrollIntoView({ behavior: "smooth", block: "nearest" }); });
+  back.addEventListener("click", () => show(step - 1));
+  $("#cos-regen", root)?.addEventListener("change", () => show(3));
+
+  const setPreview = (url: string) => {
+    avatar = url;
+    const img = $<HTMLImageElement>("#cos-preview", root)!;
+    if (url) { img.src = url; img.hidden = false; } else img.hidden = true;
+  };
+  root.querySelectorAll<HTMLElement>("[data-preset]").forEach((b) => b.addEventListener("click", () => { $<HTMLInputElement>("#cos-avatar-url", root)!.value = ""; setPreview(b.dataset.preset!); }));
+  $("#cos-avatar-url", root)!.addEventListener("input", (e) => { const v = (e.target as HTMLInputElement).value.trim(); if (/^https?:\/\//.test(v) || !v) setPreview(v); });
+  $("#cos-avatar-file", root)!.addEventListener("change", async (e) => {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    try { setPreview(await fileToAvatar(f)); fail(null); } catch (err: any) { fail(err.message); }
+  });
+
+  next.addEventListener("click", async () => {
+    fail(null);
+    if (step === 1) { if (!val("#cos-name")) return fail("Give your Chief of Staff a name."); return show(2); }
+    if (step === 2) return show(3);
+    await withBusy(next, async () => {
+      try { await finish(); } catch (err: any) { fail(err.message || "Something went wrong"); }
+    });
+  });
+
+  async function finish() {
+    const payload: Record<string, unknown> = { agent_name: val("#cos-name"), agent_role: val("#cos-role"), agent_avatar: avatar };
+    const regen = $<HTMLInputElement>("#cos-regen", root);
+    const wantKey = !regen || regen.checked;
+    let note = "";
+    if (wantKey) {
+      const signer = await getSigner(npub, val("#cos-password"));
+      const agent = generateAgentIdentity();
+      try {
+        const enc = await encryptAgentNsec(signer, agent.nsec);
+        // Prove we can read it back before the plaintext key is discarded (local key only; extensions would prompt again).
+        if (unlockedSk && (await decryptAgentNsec(signer, enc.encrypted_agent_nsec)) !== agent.nsec) throw new Error("Encryption self-check failed. Nothing was saved.");
+        Object.assign(payload, { agent_npub: agent.npub, encrypted_agent_nsec: enc.encrypted_agent_nsec, agent_encryption_scheme: SELF_SCHEME });
+        const saved = (await api("/api/account/chief-of-staff", { method: "POST", body: payload })).chiefOfStaff;
+        if ($<HTMLInputElement>("#cos-publish", root)!.checked) {
+          try {
+            const r = await publishAgentProfile(await poolRelayIO(), agent, { name: saved.agent_name, picture: /^https?:/.test(saved.agent_avatar) ? saved.agent_avatar : undefined, about: saved.agent_role || undefined }, relayList());
+            note = r.accepted ? `Profile published to ${r.accepted} relay${r.accepted === 1 ? "" : "s"}.` : "No relay accepted the agent profile.";
+          } catch (e: any) { note = `Agent profile not published: ${e.message}`; }
+        }
+        return done(saved, note);
+      } finally { agent.sk.fill(0); }
+    }
+    done((await api("/api/account/chief-of-staff", { method: "POST", body: payload })).chiefOfStaff, note);
+  }
+
+  function done(c: any, note: string) {
+    const avatarHtml = c.agent_avatar ? `<img class="cos-avatar" src="${esc(c.agent_avatar)}" alt="" width="72" height="72">` : `<span class="cos-avatar cos-avatar-empty" aria-hidden="true">${esc(c.agent_name.slice(0, 1).toUpperCase())}</span>`;
+    const card = `<div class="cos-card">${avatarHtml}<div class="cos-meta"><h3>${esc(c.agent_name)}</h3>${c.agent_role ? `<p class="muted small">${esc(c.agent_role)}</p>` : ""}
+<div class="mono copyrow"><code>${esc(c.agent_npub)}</code><button class="btn btn-outline btn-sm" type="button" data-copy="${esc(c.agent_npub)}">Copy</button></div><span class="pill pill-lock">Encrypted to your Nostr key (NIP-44)</span></div></div>`;
+    $("#cos-summary", root)!.innerHTML = card;
+    $("#cos-done", root)!.innerHTML = `${card}${note ? `<p class="muted small">${esc(note)}</p>` : ""}<div class="cos-actions"><button class="btn btn-outline" type="button" id="cos-edit">Edit</button></div>`;
+    $("#cos-edit", root)!.addEventListener("click", () => show(1));
+    show(4);
+  }
+
+  $("#cos-reveal", root)?.addEventListener("click", async () => {
+    const out = $("#cos-reveal-out", root)!;
+    try {
+      const { chiefOfStaff: c } = await api("/api/account/chief-of-staff");
+      const nsec = await decryptAgentNsec(await getSigner(npub), c.encrypted_agent_nsec);
+      $("#cos-nsec", root)!.textContent = nsec; out.hidden = false;
+      $("#cos-copy-nsec", root)!.onclick = () => navigator.clipboard?.writeText(nsec);
+    } catch (err: any) { out.hidden = true; wizard.hidden = false; show(1); fail(err.message); }
+  });
+}
+
+/** Centre-crop to a 256px square and encode small enough for the server (<~90KB). */
+async function fileToAvatar(file: File): Promise<string> {
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) throw new Error("Use a PNG, JPEG or WebP image.");
+  const bmp = await createImageBitmap(file);
+  const size = 256, side = Math.min(bmp.width, bmp.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  canvas.getContext("2d")!.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+  for (const q of [0.85, 0.7, 0.5]) {
+    const url = canvas.toDataURL("image/jpeg", q);
+    if (url.length <= 110_000) return url;
+  }
+  throw new Error("That image is too detailed to store. Try a smaller one.");
 }
 
 // ---------- Admin ----------
@@ -218,7 +410,7 @@ ${c ? `<p class="muted small">${c.enrolled} seat(s) paid so far.</p>` : ""}
     root.innerHTML = `<div class="toolbar"><div><h2>${esc(cohort.title)}</h2><span class="status status-${esc(cohort.status)}">${esc(cohort.status)}</span></div><button class="btn btn-outline" id="back">← Back</button></div>
 <div class="stats"><div class="stat"><b>${stats.seatsFilled} / ${stats.capacity}</b><span>Seats filled</span></div><div class="stat"><b>${money(stats.revenueCents, stats.currency)}</b><span>Revenue</span></div><div class="stat"><b>${r.signups.length}</b><span>Total signups (all statuses)</span></div></div>
 ${r.signups.length ? `<div class="table-wrap"><table><thead><tr><th>Participant</th><th>Username / email</th><th>npub</th><th>Chief of Staff agent</th><th>Payment</th><th>Paid</th><th>Signed up</th></tr></thead><tbody>${r.signups.map((s: any) =>
-      `<tr><td>${esc(s.name)}</td><td>${esc(s.username ?? s.email ?? "—")}</td><td><code>${esc(s.npub.slice(0, 14))}…${esc(s.npub.slice(-6))}</code> <button class="btn btn-outline btn-sm" data-copy="${esc(s.npub)}">Copy</button></td><td>${esc(s.agentName || "—")}</td><td><span class="status status-${esc(s.status)}">${esc(s.status)}</span></td><td>${s.status === "paid" ? money(s.amountCents, s.currency) : "—"}</td><td>${when(s.signedUpAt)}</td></tr>`).join("")}</tbody></table></div>`
+      `<tr><td>${esc(s.name)}</td><td>${esc(s.username ?? s.email ?? "—")}</td><td><code>${esc(s.npub.slice(0, 14))}…${esc(s.npub.slice(-6))}</code> <button class="btn btn-outline btn-sm" data-copy="${esc(s.npub)}">Copy</button></td><td>${esc(s.agentName || "—")}${s.agentNpub ? `<div class="muted small"><code>${esc(s.agentNpub.slice(0, 14))}…${esc(s.agentNpub.slice(-6))}</code></div>` : ""}</td><td><span class="status status-${esc(s.status)}">${esc(s.status)}</span></td><td>${s.status === "paid" ? money(s.amountCents, s.currency) : "—"}</td><td>${when(s.signedUpAt)}</td></tr>`).join("")}</tbody></table></div>`
       : `<div class="card"><p class="muted">No signups yet.</p></div>`}`;
     $("#back")!.onclick = cohortList;
   }

@@ -1,4 +1,11 @@
-export interface PageCtx { user: { npub: string; displayName: string; agentName: string; username: string | null; isAdmin: boolean } | null; adminNpubs: string[] }
+export interface PageCtx {
+  user: {
+    npub: string; displayName: string; avatarUrl: string; agentName: string; agentNpub: string; agentAvatar: string; agentRole: string; hasAgentKey: boolean;
+    username: string | null; isAdmin: boolean;
+  } | null;
+  adminNpubs: string[];
+  relays?: string[];
+}
 export interface CohortV {
   id: number; slug: string; title: string; tagline: string; description: string; highlights: string[]; modules: { title: string; summary: string }[];
   startDate: string; endDate: string; schedule: string; location: string; priceCents: number; currency: string; capacity: number; status: string; enrolled: number; seatsLeft: number;
@@ -21,7 +28,7 @@ export function renderPage(title: string, page: string, body: string, ctx: PageC
   const nav = [
     `<a href="/"${page === "home" ? ' aria-current="page"' : ""}>Home</a>`,
     `<a href="/courses"${page === "courses" || page === "course" ? ' aria-current="page"' : ""}>Courses</a>`,
-    u ? `<a href="/account"${page === "account" ? ' aria-current="page"' : ""}>Account</a>` : `<a href="/login"${page === "login" ? ' aria-current="page"' : ""}>Sign in</a>`,
+    u ? `<a class="nav-user" href="/account"${page === "account" ? ' aria-current="page"' : ""}>${u.avatarUrl ? `<img class="nav-avatar" src="${esc(u.avatarUrl)}" alt="" width="24" height="24" referrerpolicy="no-referrer">` : ""}<span>${esc(u.displayName || "Account")}</span></a>` : `<a href="/login"${page === "login" ? ' aria-current="page"' : ""}>Sign in</a>`,
     u ? "" : `<a class="nav-cta" href="/courses">Join a cohort</a>`,
     u?.isAdmin ? `<a href="/admin"${page === "admin" ? ' aria-current="page"' : ""}>Admin</a>` : "",
     u ? `<button class="link-btn" data-logout type="button">Sign out</button>` : "",
@@ -31,7 +38,7 @@ export function renderPage(title: string, page: string, body: string, ctx: PageC
 <meta name="theme-color" content="#000000"><meta property="og:title" content="${esc(title)} · Ambulando"><meta property="og:image" content="/assets/brand/passage-social.png">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/brand/passage-32.png"><link rel="icon" type="image/png" sizes="16x16" href="/assets/brand/passage-16.png"><link rel="apple-touch-icon" sizes="180x180" href="/assets/brand/passage-180.png"><link rel="icon" type="image/png" sizes="192x192" href="/assets/brand/passage-192.png">
 <link rel="stylesheet" href="/_app/app.css"><script type="module" src="/_app/client.js"></script></head>
-<body data-page="${esc(page)}"><a class="skip" href="#main">Skip to content</a>
+<body data-page="${esc(page)}" data-relays="${esc((ctx.relays ?? []).join(","))}"><a class="skip" href="#main">Skip to content</a>
 <header class="site"><div class="wrap bar"><a class="brand" href="/"><img src="/assets/brand/passage-app.png" width="40" height="40" alt=""><span>Ambulando</span></a><nav aria-label="Main">${nav}</nav></div></header>
 <main id="main">${body}</main>
 <footer class="site"><div class="wrap"><span>Ambulando · Work with AI, Stay Sane.</span><span class="foot-links"><a href="/courses">Courses</a><a href="/login">Sign in</a><span>Powered by NStack</span></span></div></footer>
@@ -123,13 +130,53 @@ export function loginPage() {
 <p class="muted small">New here? <a href="/courses">Browse courses</a> and enrol to create your account.</p></div></section>`;
 }
 
+const PRESET_AVATARS = ["◐", "◑", "◒", "◓", "✦", "❖"];
+
+export function presetAvatar(glyph: string) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5b4a9e"/><stop offset="1" stop-color="#e67e50"/></linearGradient></defs><rect width="96" height="96" rx="48" fill="url(#g)"/><text x="48" y="64" font-size="46" text-anchor="middle" fill="#fff" font-family="sans-serif">${glyph}</text></svg>`;
+  return "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64");
+}
+
+function cosCard(u: NonNullable<PageCtx["user"]>) {
+  const avatar = u.agentAvatar ? `<img class="cos-avatar" src="${esc(u.agentAvatar)}" alt="" width="72" height="72">` : `<span class="cos-avatar cos-avatar-empty" aria-hidden="true">${esc((u.agentName || "?").slice(0, 1).toUpperCase())}</span>`;
+  return `<div class="cos-card">${avatar}<div class="cos-meta"><h3>${esc(u.agentName)}</h3>${u.agentRole ? `<p class="muted small">${esc(u.agentRole)}</p>` : ""}
+${u.agentNpub ? `<div class="mono copyrow"><code>${esc(u.agentNpub)}</code><button class="btn btn-outline btn-sm" type="button" data-copy="${esc(u.agentNpub)}">Copy</button></div><span class="pill pill-lock">Encrypted to your Nostr key (NIP-44)</span>` : `<p class="muted small">No Nostr identity yet. Run setup to generate one.</p>`}</div></div>`;
+}
+
 export function accountPage(user: PageCtx["user"]) {
   if (!user) return `<section class="wrap section narrow"><div class="card form"><h1>Your account</h1><p>Sign in to see your courses, your npub and your Chief of Staff agent.</p><a class="btn btn-primary" href="/login">Sign in</a></div></section>`;
-  return `<section class="wrap section"><p class="eyebrow">Your account</p><h1>Hello${user.displayName ? ", " + esc(user.displayName) : ""}</h1>
+  const avatar = user.avatarUrl ? `<img class="profile-avatar" id="profile-avatar" src="${esc(user.avatarUrl)}" alt="" width="64" height="64" referrerpolicy="no-referrer">` : `<span class="profile-avatar profile-avatar-empty" id="profile-avatar" aria-hidden="true">${esc((user.displayName || "?").slice(0, 1).toUpperCase())}</span>`;
+  const presets = PRESET_AVATARS.map((g) => `<button class="preset" type="button" data-preset="${esc(presetAvatar(g))}" aria-label="Preset avatar ${esc(g)}"><img src="${esc(presetAvatar(g))}" alt="" width="44" height="44"></button>`).join("");
+  return `<section class="wrap section" id="account-root" data-npub="${esc(user.npub)}"><p class="eyebrow">Your account</p><h1>Hello${user.displayName ? ", " + esc(user.displayName) : ""}</h1>
 <div class="two">
-<div class="card form"><h2>Profile & agent</h2><form id="profile-form" class="form-inner"><label>Display name<input name="displayName" maxlength="80" value="${esc(user.displayName)}"></label><label>Chief of Staff agent name<input name="agentName" required maxlength="60" value="${esc(user.agentName)}" placeholder="e.g. Atlas"></label><div class="form-error" role="alert" hidden></div><div class="form-ok" role="status" hidden></div><button class="btn btn-primary" type="submit">Save</button></form></div>
+<div class="card form"><h2>Profile</h2><div class="profile-head">${avatar}<p class="muted small" id="profile-sync">Your name and picture sync with your Nostr profile (kind 0).</p></div>
+<form id="profile-form" class="form-inner"><label>Display name<input name="displayName" maxlength="80" value="${esc(user.displayName)}"></label><label>Avatar image URL<input name="avatarUrl" maxlength="500" inputmode="url" placeholder="https://…" value="${user.avatarUrl.startsWith("data:") ? "" : esc(user.avatarUrl)}"></label>
+<label class="check"><input type="checkbox" name="publish" checked> Also publish to Nostr relays</label>
+<div id="profile-unlock" hidden><label>Password (to sign with your backed-up key)<input name="password" type="password" autocomplete="current-password"></label></div>
+<div class="form-error" role="alert" hidden></div><div class="form-ok" role="status" hidden></div><button class="btn btn-primary" type="submit">Save profile</button></form></div>
 <div class="card form"><h2>Your Nostr identity</h2><p class="muted small">Public key</p><div class="mono copyrow"><code id="npub">${esc(user.npub)}</code><button class="btn btn-outline btn-sm" type="button" data-copy="${esc(user.npub)}">Copy</button></div>
 <div id="backup-box" hidden><p class="muted small">Your private key is backed up here, encrypted with your password. Unlock it to view or copy it.</p><form id="unlock-form" class="form-inner"><label>Password<input name="password" type="password" autocomplete="current-password" required></label><div class="form-error" role="alert" hidden></div><button class="btn btn-outline" type="submit">Unlock private key</button></form><div id="nsec-out" hidden><p class="muted small">Private key (nsec) — keep it secret</p><div class="mono copyrow"><code id="nsec"></code><button class="btn btn-outline btn-sm" id="copy-nsec" type="button">Copy</button></div></div></div></div></div>
+<div class="card" style="margin-top:24px" id="cos-section"><p class="eyebrow">Chief of Staff</p><h2>Your AI Chief of Staff</h2>
+<div id="cos-summary">${user.agentName ? cosCard(user) : `<p class="muted">You haven't set up your Chief of Staff yet.</p>`}</div>
+<div class="cos-actions"><button class="btn btn-primary" type="button" id="cos-start">${user.agentName ? "Edit Chief of Staff" : "Set up your AI Chief of Staff"}</button>${user.hasAgentKey ? `<button class="btn btn-outline" type="button" id="cos-reveal">Unlock agent key</button>` : ""}</div>
+<div id="cos-reveal-out" hidden><p class="muted small">Agent private key (nsec) — keep it secret</p><div class="mono copyrow"><code id="cos-nsec"></code><button class="btn btn-outline btn-sm" id="cos-copy-nsec" type="button">Copy</button></div></div>
+<div id="cos-wizard" class="wizard" hidden aria-live="polite">
+<ol class="steps" aria-label="Setup progress"><li data-step="1">Identity</li><li data-step="2">Picture</li><li data-step="3">Agent key</li><li data-step="4">Ready</li></ol>
+<div class="wizard-pane" data-pane="1"><h3>Setup your AI Chief of Staff</h3><p class="muted">Give your agent a name and a line about what it does for you.</p>
+<label>Name<input id="cos-name" maxlength="60" placeholder="e.g. Atlas, Rick, Nova" value="${esc(user.agentName)}" autocomplete="off"></label>
+<label>Role or focus (optional)<input id="cos-role" maxlength="200" placeholder="e.g. Keeps my week and my inbox in order" value="${esc(user.agentRole)}" autocomplete="off"></label></div>
+<div class="wizard-pane" data-pane="2" hidden><h3>Pick a picture</h3><p class="muted">Choose a preset, paste an image URL, or upload a small image.</p>
+<div class="presets">${presets}</div>
+<label>Image URL<input id="cos-avatar-url" maxlength="500" inputmode="url" placeholder="https://…" value="${user.agentAvatar.startsWith("data:") ? "" : esc(user.agentAvatar)}"></label>
+<label>Or upload (PNG/JPEG/WebP, small)<input id="cos-avatar-file" type="file" accept="image/png,image/jpeg,image/webp"></label>
+<div class="avatar-preview"><img id="cos-preview" alt="Avatar preview" width="96" height="96" ${user.agentAvatar ? `src="${esc(user.agentAvatar)}"` : "hidden"}></div></div>
+<div class="wizard-pane" data-pane="3" hidden><h3>Generate and encrypt its identity</h3><p class="muted">We create a separate Nostr keypair for your Chief of Staff in this browser. Its private key is encrypted to <em>your</em> Nostr key with NIP-44 before anything is saved. The server only ever stores ciphertext.</p>
+<div id="cos-password-row" hidden><label>Password (to unlock your key for encryption)<input id="cos-password" type="password" autocomplete="current-password"></label></div>
+<label class="check"><input type="checkbox" id="cos-publish" checked> Publish the agent's Nostr profile (name and picture) to relays</label>
+${user.hasAgentKey ? `<label class="check"><input type="checkbox" id="cos-regen"> Generate a new key (replaces the existing one)</label>` : ""}</div>
+<div class="wizard-pane" data-pane="4" hidden><h3>Your Chief of Staff is ready</h3><div id="cos-done"></div></div>
+<div class="form-error" id="cos-error" role="alert" hidden></div>
+<div class="wizard-nav"><button class="btn btn-outline" type="button" id="cos-back">Back</button><button class="btn btn-primary" type="button" id="cos-next">Continue</button></div></div></div>
 <div class="card" style="margin-top:24px"><h2>Your courses</h2><div id="my-courses" class="muted">Loading…</div></div></section>`;
 }
 

@@ -34,6 +34,7 @@ The hero retains a labelled product-video placeholder until a video URL is suppl
 ## Training signup app (Bun + SQLite + Applesauce)
 
 - Run: `bun install && bun src/server.ts` (PORT, default 3000). Tests: `bun test`.
+- Optional `NOSTR_RELAYS` (comma-separated wss URLs): relays the browser uses for kind 0 profile sync. Defaults to damus, nos.lol, primal and purplepag.es.
 - Env: `ADMIN_NPUBS` (comma-separated, defaults to Pete's npub), `DATABASE_PATH` (default `./data/ambulando.sqlite`), `APP_SECRET_KEY` (optional passphrase for encrypting Stripe keys at rest; otherwise a `secret.key` file is created next to the DB), `BASE_URL` (public origin for Stripe return URLs), `PORT`.
 - Admin: sign in at `/admin` with a NIP-07 extension using an npub in `ADMIN_NPUBS`; set Stripe keys, create cohorts, view signups.
 - Stripe webhook (optional, recommended): `POST /api/stripe/webhook` with `checkout.session.completed`. Payments are also confirmed when the buyer returns from Stripe Checkout.

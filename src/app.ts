@@ -22,7 +22,8 @@ export interface AppOptions {
 
 export interface User {
   id: number; npub: string; pubkey: string; username: string | null; email: string | null;
-  display_name: string; agent_name: string; password_hash: string | null; backup_json: string | null; created_at: number;
+  display_name: string; avatar_url: string; agent_name: string;
+  agent_npub: string; agent_avatar: string; agent_role: string; encrypted_agent_nsec: string; agent_encryption_scheme: string; password_hash: string | null; backup_json: string | null; created_at: number;
 }
 interface Cohort {
   id: number; slug: string; title: string; tagline: string; description: string; highlights: string; modules: string;
@@ -126,7 +127,7 @@ export async function createApp(opts: AppOptions = {}) {
   };
 
   function userView(u: User, isAdmin = false) {
-    return { id: u.id, npub: u.npub, username: u.username, email: u.email, displayName: u.display_name, agentName: u.agent_name, hasPassword: !!u.password_hash, hasBackup: !!u.backup_json, isAdmin };
+    return { id: u.id, npub: u.npub, username: u.username, email: u.email, displayName: u.display_name, avatarUrl: u.avatar_url, agentName: u.agent_name, agentNpub: u.agent_npub, agentAvatar: u.agent_avatar, agentRole: u.agent_role, hasAgentKey: !!u.encrypted_agent_nsec, hasPassword: !!u.password_hash, hasBackup: !!u.backup_json, isAdmin };
   }
 
   // ---------- cohorts ----------
@@ -230,6 +231,25 @@ export async function createApp(opts: AppOptions = {}) {
     if (s.length > max) throw new HttpError(400, `${label} must be ${max} characters or fewer`);
     return s;
   };
+  const cleanImage = (v: unknown, label: string) => {
+    const s = String(v ?? "").trim();
+    if (!s) return "";
+    if (/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(s)) {
+      if (s.length > 120_000) throw new HttpError(400, `${label} image is too large (max ~90KB)`);
+      return s;
+    }
+    if (s.length > 500) throw new HttpError(400, `${label} URL is too long`);
+    let u: URL;
+    try { u = new URL(s); } catch { throw new HttpError(400, `${label} must be an https image URL or an uploaded image`); }
+    if (u.protocol !== "https:" && u.protocol !== "http:") throw new HttpError(400, `${label} must be an https image URL or an uploaded image`);
+    return s;
+  };
+  /** Structural check of a NIP-44 v2 payload (base64, version byte 2, >= 99 bytes). The server cannot and does not decrypt it. */
+  const isNip44Payload = (v: unknown) => {
+    if (typeof v !== "string" || v.length < 132 || v.length > 4096 || !/^[A-Za-z0-9+/]+=*$/.test(v)) return false;
+    const bytes = Buffer.from(v, "base64");
+    return bytes.length >= 99 && bytes[0] === 2;
+  };
 
   // ---------- API ----------
   async function body(req: Request): Promise<any> {
@@ -313,9 +333,40 @@ export async function createApp(opts: AppOptions = {}) {
         const b = await body(req);
         const displayName = b.displayName !== undefined ? cleanName(b.displayName, "Display name") : s.user.display_name;
         const agentName = b.agentName !== undefined ? cleanName(b.agentName, "Chief of Staff name", 60, true) : s.user.agent_name;
-        db.query("UPDATE users SET display_name=?, agent_name=? WHERE id=?").run(displayName, agentName, s.user.id);
+        const avatarUrl = b.avatarUrl !== undefined ? cleanImage(b.avatarUrl, "Avatar") : s.user.avatar_url;
+        db.query("UPDATE users SET display_name=?, agent_name=?, avatar_url=? WHERE id=?").run(displayName, agentName, avatarUrl, s.user.id);
         const u = db.query("SELECT * FROM users WHERE id=?").get(s.user.id) as User;
         return json({ user: userView(u, s.isAdmin) });
+      }
+    }
+
+    if (path === "/api/account/chief-of-staff") {
+      const s = requireUser(req);
+      const agentView = (u: User) => ({
+        agent_name: u.agent_name, agent_avatar: u.agent_avatar, agent_role: u.agent_role, agent_npub: u.agent_npub,
+        encrypted_agent_nsec: u.encrypted_agent_nsec, agent_encryption_scheme: u.agent_encryption_scheme,
+      });
+      if (m === "GET") return json({ chiefOfStaff: agentView(s.user) });
+      if (m === "POST" || m === "PUT") {
+        const b = await body(req);
+        const name = cleanName(b.agent_name, "Chief of Staff name", 60, true);
+        const role = cleanName(b.agent_role, "Role", 200);
+        const avatar = cleanImage(b.agent_avatar, "Chief of Staff avatar");
+        const hasKey = b.agent_npub !== undefined || b.encrypted_agent_nsec !== undefined;
+        let npub = s.user.agent_npub, enc = s.user.encrypted_agent_nsec, scheme = s.user.agent_encryption_scheme;
+        if (hasKey) {
+          let ok = false;
+          try { const d = decodePointer(String(b.agent_npub ?? "")); ok = d.type === "npub"; } catch { /* invalid */ }
+          if (!ok) throw new HttpError(400, "Invalid agent npub");
+          if (b.agent_npub === s.user.npub) throw new HttpError(400, "The agent needs its own key, separate from yours");
+          if (b.agent_encryption_scheme !== "nip44_self") throw new HttpError(400, "Unsupported encryption scheme");
+          if (!isNip44Payload(b.encrypted_agent_nsec)) throw new HttpError(400, "encrypted_agent_nsec must be a NIP-44 encrypted payload. Plaintext keys are never accepted.");
+          npub = b.agent_npub; enc = b.encrypted_agent_nsec; scheme = b.agent_encryption_scheme;
+        }
+        db.query("UPDATE users SET agent_name=?, agent_role=?, agent_avatar=?, agent_npub=?, encrypted_agent_nsec=?, agent_encryption_scheme=? WHERE id=?")
+          .run(name, role, avatar, npub, enc, scheme, s.user.id);
+        const u = db.query("SELECT * FROM users WHERE id=?").get(s.user.id) as User;
+        return json({ chiefOfStaff: agentView(u), user: userView(u, s.isAdmin) });
       }
     }
 
@@ -537,14 +588,14 @@ export async function createApp(opts: AppOptions = {}) {
       const cur = cohortById(Number(mm[1]));
       if (!cur) throw new HttpError(404, "Cohort not found");
       const rows = db.query(
-        `SELECT e.id, e.status, e.amount_cents, e.currency, e.created_at, e.paid_at, u.display_name, u.username, u.email, u.npub, u.agent_name
+        `SELECT e.id, e.status, e.amount_cents, e.currency, e.created_at, e.paid_at, u.display_name, u.username, u.email, u.npub, u.agent_name, u.agent_npub
          FROM enrolments e JOIN users u ON u.id=e.user_id WHERE e.cohort_id=? ORDER BY e.created_at DESC`,
       ).all(cur.id) as any[];
       return json({
         cohort: cohortView(cur),
         stats: { seatsFilled: paidCount(cur.id), capacity: cur.capacity, revenueCents: revenue(cur.id), currency: cur.currency },
         signups: rows.map((r) => ({
-          id: r.id, name: r.display_name, username: r.username, email: r.email, npub: r.npub, agentName: r.agent_name,
+          id: r.id, name: r.display_name, username: r.username, email: r.email, npub: r.npub, agentName: r.agent_name, agentNpub: r.agent_npub,
           status: r.status, amountCents: r.status === "paid" ? r.amount_cents : 0, currency: r.currency, signedUpAt: r.created_at, paidAt: r.paid_at,
         })),
       });
@@ -558,7 +609,7 @@ export async function createApp(opts: AppOptions = {}) {
   async function pages(req: Request, url: URL): Promise<Response | null> {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const s = currentSession(req);
-    const ctx = { user: s ? userView(s.user, s.isAdmin) : null, adminNpubs: config.adminNpubs };
+    const ctx = { user: s ? userView(s.user, s.isAdmin) : null, adminNpubs: config.adminNpubs, relays: config.nostrRelays };
     const html = (status: number, title: string, page: string, bodyHtml: string) =>
       new Response(renderPage(title, page, bodyHtml, ctx), { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
     const { homePage, catalogPage, coursePage, enrolPage, completePage, loginPage, accountPage, adminPage, notFoundPage } = await import("./views.ts");
