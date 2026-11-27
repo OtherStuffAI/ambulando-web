@@ -15,6 +15,12 @@ export class SecretBox {
     return new SecretBox(key);
   }
 
+  /** Legacy SQLite deployments kept a random 32-byte key in data/secret.key; only the importer uses this. */
+  static async fromRaw(raw: Uint8Array<ArrayBuffer>): Promise<SecretBox> {
+    if (raw.length !== 32) throw new Error("Raw secret key must be 32 bytes");
+    return new SecretBox(await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]));
+  }
+
   async seal(plain: string): Promise<string> {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, this.key, new TextEncoder().encode(plain)));

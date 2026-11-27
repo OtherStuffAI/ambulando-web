@@ -8,7 +8,7 @@ The approved Ambulando marketing v7, packaged as a static Nginx website for CapR
 - Build branch: `deployed`
 - Captain definition: `/captain-definition` at repository root (schema 2).
 - Container HTTP port: **80**.
-- Enable HTTPS on your chosen domain. No persistent directories or environment variables are required.
+- Enable HTTPS on your chosen domain. No persistent directories are needed; see the app section below for required environment variables.
 - Check `/health`, `/`, stylesheet and image loading after deployment.
 
 ## Local container
@@ -31,11 +31,36 @@ Develop on `main`, validate and push it, then fast-forward `deployed` from `main
 
 The hero retains a labelled product-video placeholder until a video URL is supplied. Product screenshots use isolated sample data; the business/time example is illustrative. See `public/source-notes.md` for provenance and claim boundaries.
 
-## Training signup app (Bun + SQLite + Applesauce)
+## Training signup app (Bun + NStack + Applesauce)
 
-- Run: `bun install && bun src/server.ts` (PORT, default 3000). Tests: `bun test`.
-- Optional `NOSTR_RELAYS` (comma-separated wss URLs): relays the browser uses for kind 0 profile sync. Defaults to damus, nos.lol, primal and purplepag.es.
-- Env: `ADMIN_NPUBS` (comma-separated, defaults to Pete's npub), `DATABASE_PATH` (default `./data/ambulando.sqlite`), `APP_SECRET_KEY` (optional passphrase for encrypting Stripe keys at rest; otherwise a `secret.key` file is created next to the DB), `BASE_URL` (public origin for Stripe return URLs), `PORT`.
+All site data (users, sessions, cohorts, enrolments, seats, Stripe events, settings) lives in this site's own **NStack app namespace** (`https://nstack.otherstuff.ai`, generic app-signed relational API). The app owns its schema (`src/schema.ts`, checksummed append-only migrations) and business rules; NStack owns isolation and authority. There is no local database and no durable local file.
+
+- Run: `bun install && bun src/server.ts` (PORT, default 3000). Tests: `bun test ./test`.
+- Required env: `NSTACK_APP_NSEC` (the app's signing key; server-side only, never sent to browsers), `APP_SECRET_KEY` (passphrase that seals Stripe secrets at rest in NStack; losing it makes saved Stripe keys unreadable, so back it up), `NSTACK_OWNER_NPUB` (defaults to Pete's npub), `NSTACK_URL` (defaults to `https://nstack.otherstuff.ai`), optional `NSTACK_APP_NPUB` (asserted against the key), `NSTACK_APP_SLUG`.
+- Other env: `ADMIN_NPUBS` (comma-separated, defaults to Pete's npub), `NOSTR_RELAYS` (relays the browser uses for kind 0 profile sync), `BASE_URL` (public origin for Stripe return URLs), `PORT`.
+- On start the app idempotently provisions its namespace and applies migrations. The app npub must already be registered (enabled) as a workspace app for the owner on NStack.
 - Admin: sign in at `/admin` with a NIP-07 extension using an npub in `ADMIN_NPUBS`; set Stripe keys, create cohorts, view signups.
 - Stripe webhook (optional, recommended): `POST /api/stripe/webhook` with `checkout.session.completed`. Payments are also confirmed when the buyer returns from Stripe Checkout.
-- Persist the DB directory (`/data` in the Docker image) so users, backups and the encryption key survive deploys.
+
+### Correctness under concurrency
+
+NStack's generic API offers single-row operations, so invariants are encoded as unique indexes and compare-and-set updates rather than read-then-write:
+
+- **Capacity**: each seat is a row with id `<cohort>:<n>`; one insert wins a seat, and a lapsed reservation is taken over with a conditional update on its current holder. Concurrent signups can never oversell. A payment that completes after its reservation lapsed is honoured (paid seats may exceed capacity rather than lose a payer's seat).
+- **Accounts**: unique indexes on npub, pubkey and lower-cased username decide concurrent signups; a signup that cannot get a seat removes the account it just created.
+- **Payments**: settlement is a conditional update (`status != paid`), so webhook retries and the buyer's return race safely; Stripe events are recorded and only skipped once fully processed.
+- **Ids**: integer ids come from a compare-and-set counter (gaps possible, no duplicates).
+
+### Moving data from the legacy SQLite database
+
+`scripts/import-sqlite.ts` copies the old database into NStack, preserving every id, session, password hash, encrypted backup and agent ciphertext, re-sealing Stripe secrets under `APP_SECRET_KEY`, and verifying row counts plus a SHA-256 per table by reading everything back. It is repeatable (identical rows are skipped, differing rows stop the run), never modifies the SQLite file, and writes a manifest that `--rollback` uses to delete only the rows that run created.
+
+```sh
+bun scripts/import-sqlite.ts --source ./ambulando.sqlite --manifest ./import-manifest.json --source-key-file ./secret.key --dry-run
+bun scripts/import-sqlite.ts --source ./ambulando.sqlite --manifest ./import-manifest.json --source-key-file ./secret.key
+bun scripts/import-sqlite.ts --rollback ./import-manifest.json
+```
+
+### Testing against the real NStack code
+
+`bun test ./test` uses an in-process fake of the NStack contract. `TOWER_SRC=/path/to/tower scripts/real-nstack-test.sh` additionally runs `test/nstack-real.test.ts` against Tower's actual app-db implementation on a throwaway local PostgreSQL (started and removed by the script).
