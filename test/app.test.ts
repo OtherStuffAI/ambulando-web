@@ -121,7 +121,7 @@ describe("stripe settings", () => {
     expect(text).not.toContain("SECRETSECRET");
     expect(text).not.toContain(stripeKeys.webhookSecret);
     // Stored encrypted at rest
-    const raw = JSON.stringify(s.app.db.query("SELECT * FROM settings").all());
+    const raw = JSON.stringify(s.fake.rows("settings"));
     expect(raw).not.toContain("SECRETSECRET");
   });
   test("validates formats, mode mismatch; blank secret keeps existing", async () => {
@@ -191,7 +191,7 @@ describe("signup, backup and login", () => {
     const r = await s.anon().post(`/api/courses/${c.slug}/enrol`, body);
     expect(r.status).toBe(503);
     expect(((await r.json()) as any).code).toBe("stripe_not_configured");
-    expect((s.app.db.query("SELECT COUNT(*) n FROM users").get() as any).n).toBe(1); // admin only
+    expect(s.fake.rows("users").length).toBe(1); // admin only
     expect(await (await s.anon().get(`/courses/${c.slug}/enrol`)).text()).toContain("Payments aren't set up yet");
   });
   test("signup creates account + encrypted backup + checkout; login restores nsec", async () => {
@@ -210,7 +210,7 @@ describe("signup, backup and login", () => {
     expect(params).toMatchObject({ amountCents: 10000, currency: "aud", customerEmail: "sam@example.com" });
     expect(params.successUrl).toContain("{CHECKOUT_SESSION_ID}");
     // DB holds the bundle and a hash, never plaintext nsec/password
-    const row = s.app.db.query("SELECT * FROM users WHERE npub=?").get(npub) as any;
+    const row = s.fake.rows("users").find((r) => r.npub === npub)!;
     expect(JSON.stringify(row)).not.toContain(nsec);
     expect(row.password_hash).not.toContain("correct horse");
     expect(await Bun.password.verify("correct horse", row.password_hash)).toBe(true);
@@ -289,10 +289,11 @@ describe("payments", () => {
     const full = await s.anon().post(`/api/courses/${c.slug}/enrol`, (await signupBody({ identifier: "c@example.com" })).body);
     expect(full.status).toBe(409);
     expect(((await full.json()) as any).code).toBe("cohort_full");
-    expect((s.app.db.query("SELECT COUNT(*) n FROM users WHERE username='c@example.com'").get() as any).n).toBe(0);
+    expect(s.fake.rows("users").filter((r) => r.username === "c@example.com").length).toBe(0);
     expect(await (await s.anon().get(`/courses/${c.slug}`)).text()).toContain("Cohort full");
     // reservation lapses
-    s.app.db.query("UPDATE enrolments SET reserved_until=1 WHERE status='pending'").run();
+    for (const r of s.fake.rows("seats")) if (r.state === "held") r.reserved_until = 1;
+    for (const r of s.fake.rows("enrolments")) if (r.status === "pending") r.reserved_until = 1;
     expect((await s.anon().post(`/api/courses/${c.slug}/enrol`, (await signupBody({ identifier: "c@example.com" })).body)).status).toBe(200);
   });
   test("expired checkout marks failed; retry creates a new session without duplicating enrolment", async () => {
@@ -301,7 +302,7 @@ describe("payments", () => {
     expect(((await (await user.get(`/api/enrolments/confirm?session_id=${sessionId}`)).json()) as any).status).toBe("failed");
     const retry = (await (await user.post(`/api/courses/${c.slug}/enrol`, { agentName: "Atlas" })).json()) as any;
     expect(retry.checkoutUrl).toContain("cs_test_2");
-    expect((s.app.db.query("SELECT COUNT(*) n FROM enrolments").get() as any).n).toBe(1);
+    expect(s.fake.rows("enrolments").length).toBe(1);
     s.stripe.pay("cs_test_2");
     expect(((await (await user.get("/api/enrolments/confirm?session_id=cs_test_2")).json()) as any).status).toBe("paid");
   });
@@ -333,7 +334,7 @@ describe("payments", () => {
     const c = await withCohort(s);
     const orig = s.stripe.factory;
     const failing = (k: string) => ({ ...orig(k), createCheckoutSession: async () => { throw new Error("boom"); } });
-    const app2 = await createApp({ db: s.app.db, config: { databasePath: ":memory:", adminNpubs: [], secretKey: "test-secret" }, stripeFactory: failing });
+    const app2 = await createApp({ nstack: s.nstack.nstack, config: { adminNpubs: [], secretKey: "test-secret" }, stripeFactory: failing });
     const r = await new Client(app2).post(`/api/courses/${c.slug}/enrol`, (await signupBody()).body);
     expect(r.status).toBe(502);
     expect(((await r.json()) as any).code).toBe("stripe_error");
@@ -492,7 +493,7 @@ describe("profile and Chief of Staff API", () => {
   });
 
   test("saves Chief of Staff with a NIP-44 self-encrypted agent key; server never holds plaintext", async () => {
-    const { c, user, sk, npub, app } = await member();
+    const { c, user, sk, npub, fake } = await member();
     const agent = generateAgentIdentity();
     const enc = await encryptAgentNsec(user, agent.nsec);
     const r = await c.post("/api/account/chief-of-staff", {
@@ -510,8 +511,8 @@ describe("profile and Chief of Staff API", () => {
     expect(got.encrypted_agent_nsec).toBe(enc.encrypted_agent_nsec);
     expect(await decryptAgentNsec(localSigner(sk), got.encrypted_agent_nsec)).toBe(agent.nsec);
 
-    // Nothing in SQLite contains the plaintext nsec or its raw secret bytes.
-    const dump = JSON.stringify(app.db.query("SELECT * FROM users").all());
+    // Nothing stored in NStack contains the plaintext nsec or its raw secret bytes.
+    const dump = JSON.stringify(fake.rows("users"));
     expect(dump).not.toContain(agent.nsec);
     expect(dump).not.toContain(Buffer.from(agent.sk).toString("hex"));
     expect(dump).toContain(enc.encrypted_agent_nsec);

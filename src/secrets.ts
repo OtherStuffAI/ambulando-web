@@ -1,26 +1,16 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { toBase64, fromBase64 } from "./shared/backup.ts";
 
-/** AES-256-GCM envelope for server-side secrets (Stripe keys) stored in SQLite. */
+/**
+ * AES-256-GCM envelope for server-side secrets (Stripe keys) stored in NStack.
+ * The key comes from APP_SECRET_KEY (SHA-256 of the passphrase). It is never written to disk:
+ * the container filesystem is ephemeral, and a key file would be lost with it.
+ */
 export class SecretBox {
   private constructor(private key: CryptoKey) {}
 
-  static async create(opts: { secretKey?: string; databasePath: string }): Promise<SecretBox> {
-    let raw: Uint8Array<ArrayBuffer>;
-    if (opts.secretKey) {
-      raw = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(opts.secretKey)));
-    } else if (opts.databasePath === ":memory:") {
-      raw = crypto.getRandomValues(new Uint8Array(32));
-    } else {
-      const file = join(dirname(opts.databasePath), "secret.key");
-      mkdirSync(dirname(file), { recursive: true });
-      if (existsSync(file)) raw = fromBase64(readFileSync(file, "utf8").trim());
-      else {
-        raw = crypto.getRandomValues(new Uint8Array(32));
-        writeFileSync(file, toBase64(raw), { mode: 0o600 });
-      }
-    }
+  static async create(opts: { secretKey?: string }): Promise<SecretBox> {
+    if (!opts.secretKey) throw new Error("APP_SECRET_KEY is required: it seals Stripe secrets stored in NStack");
+    const raw = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(opts.secretKey)));
     const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
     return new SecretBox(key);
   }

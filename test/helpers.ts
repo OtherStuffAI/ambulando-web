@@ -2,6 +2,8 @@ import { generateSecretKey, getPublicKey } from "applesauce-core/helpers/keys";
 import { npubEncode, nsecEncode } from "applesauce-core/helpers/pointers";
 import { PrivateKeySigner } from "applesauce-signers";
 import { createApp, AUTH_KIND } from "../src/app.ts";
+import { NstackDb } from "../src/nstack.ts";
+import { FakeNstack } from "./fake-nstack.ts";
 import { encryptNsec } from "../src/shared/backup.ts";
 import type { CheckoutParams, CheckoutSession, StripeClient } from "../src/stripe.ts";
 
@@ -57,14 +59,22 @@ export class Client {
   }
 }
 
-export async function setup() {
+export function newNstack(owner = npubEncode(getPublicKey(generateSecretKey()))) {
+  const appSk = generateSecretKey();
+  const fake = new FakeNstack(owner, appSk);
+  const nstack = new NstackDb({ baseUrl: "https://nstack.test", ownerNpub: owner, appSecret: nsecEncode(appSk), fetch: fake.fetch as typeof fetch });
+  return { fake, nstack, owner, appSk };
+}
+
+export async function setup(opts: { stripeFactory?: (k: string) => StripeClient; shared?: ReturnType<typeof newNstack> } = {}) {
   const adminSk = generateSecretKey();
   const adminNpub = npubEncode(getPublicKey(adminSk));
   const stripe = new MockStripe();
-  const app = await createApp({ config: { databasePath: ":memory:", adminNpubs: [adminNpub], secretKey: "test-secret" }, stripeFactory: stripe.factory });
+  const ns = opts.shared ?? newNstack();
+  const app = await createApp({ nstack: ns.nstack, config: { adminNpubs: [adminNpub], secretKey: "test-secret" }, stripeFactory: opts.stripeFactory ?? stripe.factory });
   const admin = new Client(app);
   await admin.nostrLogin(adminSk);
-  return { app, stripe, admin, adminSk, adminNpub, anon: () => new Client(app) };
+  return { app, stripe, admin, adminSk, adminNpub, fake: ns.fake, nstack: ns, anon: () => new Client(app) };
 }
 
 export async function signupBody(overrides: Record<string, unknown> = {}, password = "correct horse") {

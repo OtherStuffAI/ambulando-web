@@ -5,7 +5,7 @@
   "scripts": {
     "start": "bun src/server.ts",
     "dev": "bun --watch src/server.ts",
-    "test": "bun test"
+    "test": "bun test ./test"
   },
   "dependencies": {
     "applesauce-core": "^7.1.3",
